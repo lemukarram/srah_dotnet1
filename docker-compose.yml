@@ -1,0 +1,96 @@
+
+# ============================================================
+# Sarh Summarizer — Full Docker Environment
+# ============================================================
+# Services:
+#   api       — ASP.NET Core 8 summarization service
+#   seq       — Structured log viewer (Serilog/ILogger UI)
+#   redis     — Optional: for future multi-instance job queuing
+#
+# Usage:
+#   docker compose up --build          # first run
+#   docker compose up                  # subsequent runs
+#   docker compose down -v             # stop + remove volumes
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Main API Service
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    container_name: sarh-summarizer-api
+    restart: unless-stopped
+    ports:
+      - "5005:8080"          # host:container — curl localhost:5005
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      # Seq logging endpoint (optional — remove if not using Seq)
+      SEQ_URL: http://seq:5341
+      # Adjust these if you wire in a real LLM later
+      # LLM__ApiKey: ""
+      # LLM__Model: "gpt-4o"
+      # LLM__BaseUrl: "https://api.openai.com/v1"
+    depends_on:
+      - seq
+    networks:
+      - sarh-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------
+  # Seq — Structured Log Viewer
+  # Open http://localhost:5341 to browse logs in real time
+  # See every LLM call, token count, cost, retry attempts
+  # ----------------------------------------------------------
+  seq:
+    image: datalust/seq:latest
+    container_name: sarh-seq
+    restart: unless-stopped
+    ports:
+      - "5341:80"            # Seq UI at http://localhost:5341
+    environment:
+      ACCEPT_EULA: "Y"
+    volumes:
+      - seq-data:/data
+    networks:
+      - sarh-net
+
+  # ----------------------------------------------------------
+  # Redis — Uncomment when scaling to multiple API instances
+  # (replace in-memory Channel with RedisChannel)
+  # ----------------------------------------------------------
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: sarh-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - sarh-net
+  #   command: redis-server --appendonly yes
+
+# ----------------------------------------------------------
+# Volumes
+# ----------------------------------------------------------
+volumes:
+  seq-data:
+  # redis-data:
+
+# ----------------------------------------------------------
+# Networks
+# ----------------------------------------------------------
+networks:
+  sarh-net:
+    driver: bridge
