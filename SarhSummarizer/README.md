@@ -1,60 +1,76 @@
-# Sarh Summarizer API
+# Sarh Summarizer Service
 
-This is an asynchronous backend service that orchestrates calls to an AI/LLM API for summarization. It is designed with bounded concurrency, queueing, and resilience in mind.
+An asynchronous, resilient document summarization service built with ASP.NET Core 8.0. This service orchestrates calls to an LLM API to summarize long documents while ensuring system stability through bounded concurrency and chunking logic.
 
-## Core Requirements Implemented
+## Key Features
 
-- **Bounded Concurrency:** The `SummarizationWorker` processes background jobs with a configurable concurrency limit (default 3) using a `SemaphoreSlim`. This acts as a worker pipeline and enforces back-pressure.
-- **Priority Queue:** The `JobQueue` uses a two-tier internal queue system, always yielding `high` priority jobs before `normal` jobs.
-- **Chunking & Reassembly (Map-Reduce):** Documents are chunked into pieces in `LlmService`. Each chunk is sent to the mock LLM. If there are multiple chunks, their resulting summaries are concatenated and sent for a final summarization pass.
-- **Resilience:** Polly is used for transient fault handling in `LlmService`. A retry policy with exponential backoff triggers on `HttpRequestException` (which is randomly thrown by the `MockLlmClient`).
-- **Monitoring & Logging:** `ILogger` is used throughout to record tokens used, cost per job, and to trace the job lifecycle. If used with the included `seq` container, structured logs provide deep visibility.
-- **Validation:** Strict validation rules apply to incoming text: requests with over 50,000 words are rejected with a 400 Bad Request. Empty content is also rejected.
+### 1. Bounded Concurrency & Queueing
+The service uses a background worker (`SummarizationWorker`) and a priority-aware queue (`JobQueue`) to manage workload. 
+- **Concurrency Limit:** Set to `N` (default 3), ensuring that no more than 3 model calls are active simultaneously across the entire system.
+- **Back-pressure:** Incoming jobs are queued and processed as workers become available, preventing model overload.
 
-## Stretch Goals Implemented
+### 2. Document Chunking & Reassembly (Map-Reduce)
+Documents exceeding the model's context window are split into chunks.
+- **Map:** Each chunk is summarized individually.
+- **Reduce:** Summaries are combined and summarized once more to produce a coherent final output.
+- **Aggregation:** Token usage and USD costs are aggregated across all chunks for accurate reporting.
 
-- **Listing Endpoint:** The `GET /jobs?status=...&limit=10&offset=0` endpoint is fully implemented and operational, enabling an administrative dashboard to monitor queue length and statuses.
-- **Idempotency Key:** Implemented basic idempotency based on an `Idempotency-Key` header during job submission to prevent duplicate job creation.
+### 3. Resilience & Stability
+Built-in resilience using **Polly**:
+- **Retry Policy:** Automatic retries for transient failures (timeouts, rate limits, 5xx) with exponential backoff.
+- **Fault Isolation:** A single failed chunk correctly fails the entire job with a detailed error message, preventing partial or misleading results.
 
-## Stretch Goals Skipped & Trade-offs (Time Constraints)
+### 4. Priority Handling
+The service supports `high` and `normal` priority jobs. High-priority jobs jump to the front of the queue to ensure faster processing for critical tasks.
 
-To prioritize robust functionality and correct concurrency logic over half-working features, the following stretch goals were omitted:
+### 5. Input Validation & Robustness
+- **Strict Validation:** Rejects empty inputs, documents exceeding 50,000 words, and invalid priority levels.
+- **JSON Newline Support:** Custom handling for unescaped control characters (like newlines) in the JSON body, often encountered in raw document ingestion.
+- **Multi-Format Support:** Accepts both `application/json` and `text/plain` content types.
 
-- **Persistence (SQLite/File-based):** Currently, jobs are stored in an in-memory `ConcurrentDictionary`. 
-  - *How I would implement it:* I would use Entity Framework Core with a SQLite provider, mapping the `Job` model to a database table. The background worker would query the DB for "Pending" jobs or use a transactional outbox pattern rather than relying on an in-memory queue.
-- **Deduplication by Content Hash:** 
-  - *How I would implement it:* Before creating a job, compute a SHA-256 hash of the input text. Check a cache (e.g., Redis or an in-memory cache) for this hash. If a completed result exists, return it immediately to save LLM costs.
-- **Unit/Integration Testing:** 
-  - *How I would implement it:* I would create an xUnit project, using `WebApplicationFactory` for integration tests to verify the API endpoints. I would inject a test-specific `ILlmClient` to verify that `N` concurrent calls are strictly enforced and priority queueing works as expected under load.
+---
 
-## Running the Application
+## Technical Design Choices
 
-Use Docker Compose to spin up the API and the Seq logging instance:
+- **Minimal APIs:** Used for high-performance, low-boilerplate endpoint mapping.
+- **BackgroundService:** Leverages .NET's native `IHostedService` for the worker pipeline.
+- **Structured Logging:** All token counts, costs, and job events are logged using structured data for easy monitoring and dashboarding.
+- **In-Memory Store:** Job states are currently managed in-memory (using `ConcurrentDictionary`) for speed, which can be easily swapped for a persistent store (SQLite/Redis) if needed.
+
+---
+
+## How to Run
+
+### Using Docker Compose
+The easiest way to start the service and its dependencies:
 
 ```bash
-docker compose up --build
+docker-compose up --build
 ```
 
-- API Base URL: `http://localhost:5005`
-- Seq Logging UI: `http://localhost:5341`
+The API will be available at `http://localhost:5000`.
 
-## Example Flow
-
-1. Submit a job:
+### Local Execution (requires .NET 8 SDK)
 ```bash
-curl -X POST http://localhost:5005/jobs \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: my-unique-key" \
-  -d '{"text": "A very long document goes here...", "priority": "high"}'
+cd SarhSummarizer
+dotnet run
 ```
 
-2. Check Status:
-```bash
-curl http://localhost:5005/jobs/{jobId}
-```
+---
 
-3. List Jobs:
-```bash
-curl "http://localhost:5005/jobs?status=Processing&limit=5"
-```us=Processing&limit=5"
-```
+## API Endpoints
+
+- `POST /jobs`: Submit a document for summarization.
+- `GET /jobs/{jobId}`: Check job status, progress, and retrieve results.
+- `GET /jobs`: List all jobs (with optional status filtering and pagination).
+- `DELETE /jobs/{jobId}`: Cancel a pending or processing job.
+
+---
+
+## What I Would Add With More Time
+
+1. **Persistence:** Implement a SQLite or Redis back-end to allow jobs to survive service restarts.
+2. **Deduplication:** Use a hash (e.g., SHA-256) of the input text to cache results and avoid redundant model calls.
+3. **Webhooks:** Allow users to provide a callback URL for job completion notifications instead of polling.
+4. **Enhanced Monitoring:** Add a Grafana/Prometheus dashboard to visualize concurrency, error rates, and costs in real-time.
+5. **Unit/Integration Tests:** Expand test coverage to include more edge cases and simulated race conditions in the priority queue.

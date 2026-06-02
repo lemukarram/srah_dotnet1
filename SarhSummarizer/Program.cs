@@ -2,12 +2,20 @@ using Microsoft.AspNetCore.Mvc;
 using SarhSummarizer.Models;
 using SarhSummarizer.Services;
 using SarhSummarizer.Workers;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+// Configure global JSON options for serialization
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.PropertyNameCaseInsensitive = true;
+    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+});
 
 // Register App Services
 builder.Services.AddSingleton<IJobQueue, JobQueue>();
@@ -33,29 +41,56 @@ app.UseHttpsRedirection();
 
 // Map Endpoints
 
-app.MapPost("/jobs", async (HttpContext httpContext, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, IJobManager jobManager) =>
+app.MapPost("/jobs", async (
+    HttpContext httpContext, 
+    [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, 
+    IJobManager jobManager) =>
 {
-    if (httpContext.Request.ContentType == null || !httpContext.Request.ContentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
+    SubmitJobRequest? request = null;
+    string contentType = httpContext.Request.ContentType ?? "";
+
+    if (contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
     {
-        return Results.Json(new { error = "Content type must be application/json." }, statusCode: 415);
-    }
-    
-    SubmitJobRequest? request;
-    try
-    {
-        request = await httpContext.Request.ReadFromJsonAsync<SubmitJobRequest>();
-        if (request == null)
+        try
         {
-            return Results.BadRequest(new { error = "Invalid JSON body." });
+            // .NET 8's System.Text.Json is strict about unescaped control characters in strings.
+            // To handle literal newlines, we read the body and manually escape them before deserialization.
+            using var reader = new StreamReader(httpContext.Request.Body);
+            var rawBody = await reader.ReadToEndAsync();
+            
+            // This is a simple heuristic: replace literal newlines with escaped versions.
+            var sanitizedJson = rawBody.Replace("\n", "\\n").Replace("\r", "\\r");
+            
+            var serializerOptions = new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            };
+            request = JsonSerializer.Deserialize<SubmitJobRequest>(sanitizedJson, serializerOptions);
+        }
+        catch (JsonException ex)
+        {
+            return Results.BadRequest(new { error = "Invalid JSON format: " + ex.Message });
+        }
+        catch (BadHttpRequestException ex)
+        {
+            return Results.BadRequest(new { error = "Invalid request: " + ex.Message });
         }
     }
-    catch (System.Text.Json.JsonException ex)
+    else if (contentType.StartsWith("text/plain", StringComparison.OrdinalIgnoreCase))
     {
-        return Results.BadRequest(new { error = "Invalid JSON format: " + ex.Message });
+        using var reader = new StreamReader(httpContext.Request.Body);
+        var text = await reader.ReadToEndAsync();
+        request = new SubmitJobRequest { Text = text, Priority = "normal" };
     }
-    catch (Microsoft.AspNetCore.Http.BadHttpRequestException ex)
+    else
     {
-        return Results.BadRequest(new { error = "Invalid request: " + ex.Message });
+        return Results.Json(new { error = "Content type must be application/json or text/plain." }, statusCode: 415);
+    }
+
+    if (request == null)
+    {
+        return Results.BadRequest(new { error = "Request body could not be parsed." });
     }
     
     if (string.IsNullOrWhiteSpace(request.Text))
