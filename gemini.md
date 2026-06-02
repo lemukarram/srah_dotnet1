@@ -1,197 +1,62 @@
-# GEMINI.md — Master Instructions for Sarh Backend Assessment
 
-You are a senior .NET backend engineer completing a timed technical assessment.
-Read every instruction in this file before writing a single line of code.
+# Sarh Backend Developer Assessment Analysis
 
----
+This document provides a comprehensive breakdown and strategic guide for the **Sarh Advanced .NET Backend Developer Assessment**. This assessment is designed to evaluate your ability to architect a robust, concurrent backend system under time pressure.
 
-## YOUR IDENTITY & GOAL
-
-You are building a production-quality .NET 8 ASP.NET Core Web API that:
-1. Accepts long text documents for summarization
-2. Processes them asynchronously via a background job queue
-3. Returns job status/results via polling endpoint
-4. Handles chunking, retries, validation, and cost logging
-
-The evaluators are looking for: **async patterns, error handling, clean architecture, observability**.
-They are NOT looking for: perfect AI integration, fancy prompts, UI.
+## Assessment Overview
+* **Duration:** 1 hour 30 minutes total (10 mins planning, 80 mins building) [cite: 16].
+* **Goal:** Build an asynchronous backend service that orchestrates calls to an AI/LLM API while ensuring stability, concurrency control, and resilience [cite: 9, 27].
+* **Philosophy:** Quality over quantity. Well-reasoned, smaller, correct code is preferred over a large amount of half-working code [cite: 12].
 
 ---
 
-## TECH STACK — USE EXACTLY THESE
+## Technical Requirements (Core First)
+The assessment emphasizes "Core" requirements [cite: 13, 14, 48]. Focus on these before attempting "Stretch" goals.
 
-- **Framework**: .NET 8, ASP.NET Core Minimal API (faster to scaffold, cleaner for small services)
-- **Job Queue**: `System.Threading.Channels` — in-memory, no external deps needed
-- **Background Worker**: `BackgroundService` hosted service
-- **Retry/Resilience**: `Polly` v8 (`Microsoft.Extensions.Http.Polly`)
-- **Logging**: Built-in `ILogger<T>` with structured logging (no extra packages needed)
-- **Validation**: Data Annotations + manual guard clauses (no FluentValidation needed for scope)
-- **Storage**: `ConcurrentDictionary<string, SummarizationJob>` — in-memory is fine, mention DB in README
-- **LLM Client**: MockLlmClient (Option A) — do NOT waste time on real API key setup
+### 1. Core Requirements
+* **Bounded Concurrency:** Use a background worker pipeline to limit model calls to `N` (configurable, default 3) [cite: 49]. Must implement queuing/back-pressure [cite: 50, 72].
+* **Chunking & Reassembly:** Implement a map-reduce style logic: summarize chunks individually, then aggregate into a final summary [cite: 51].
+* **Resilience:** Handle transient failures (5xx, timeouts, 429s) using retry + backoff strategies (Polly is recommended) [cite: 53, 71].
+* **Priority Queue:** "High" priority jobs must be processed before "normal" jobs [cite: 56].
+* **Monitoring:** Log tokens (input/output) and calculate costs using structured logging (e.g., Serilog) [cite: 57, 75].
+* **Validation:** Strict input validation (empty input, max 50,000 words, content types) [cite: 58].
 
----
-
-## PROJECT STRUCTURE — CREATE EXACTLY THIS
-
-```
-SarhSummarizer/
-├── SarhSummarizer.csproj
-├── Program.cs                  # Minimal API setup, DI registration, endpoint mapping
-├── Models/
-│   ├── SummarizationJob.cs     # Job entity with status enum
-│   ├── LlmResponse.cs          # LLM response record
-│   └── ApiModels.cs            # Request/Response DTOs
-├── Services/
-│   ├── ILlmClient.cs           # Interface
-│   ├── MockLlmClient.cs        # Mock implementation (as per brief)
-│   ├── IJobStore.cs            # Interface for job storage
-│   ├── InMemoryJobStore.cs     # ConcurrentDictionary implementation
-│   └── TextChunker.cs          # Chunking logic for >context window docs
-├── Workers/
-│   └── SummarizationWorker.cs  # BackgroundService that processes the Channel queue
-└── README.md
-```
+### 2. Stretch Goals
+* **Persistence:** Survive restarts using SQLite/File-based storage [cite: 61].
+* **Deduplication:** Cache results by content hash [cite: 63].
+* **Listing Endpoint:** Support GET `/jobs?status=...` [cite: 64].
+* **Testing:** Include at least one meaningful integration/unit test verifying core guarantees (e.g., concurrency limits) [cite: 65].
 
 ---
 
-## IMPLEMENTATION RULES — FOLLOW STRICTLY
+## Strategy & Implementation Roadmap
 
-### Rule 1: Async-First
-- POST /summarize MUST return immediately (< 5ms) with jobId
-- NEVER await the LLM call in the endpoint handler
-- Enqueue to Channel, return jobId, done
+### Phase 1: Planning (10 Minutes)
+* **Decision Making:** Do not start coding immediately [cite: 19].
+* **Data Model:** Define the `Job` structure, `JobStatus` enum, and how you will store state in memory (or persist if time allows).
+* **Concurrency Strategy:** Plan how you will use `SemaphoreSlim` or `System.Threading.Channels` to manage the worker pipeline and enforce the `N` concurrency limit [cite: 72, 74].
 
-### Rule 2: Job Status Flow
-```
-Pending → Processing → Completed
-                    ↘ Failed (with ErrorReason)
-```
-
-### Rule 3: Chunking Logic (CRITICAL — evaluators will test with 12,000 word doc)
-- Max chunk size: 3,000 words (~4,000 tokens, safe for most models)
-- Split on paragraph boundaries (`\n\n`) first, then sentence boundaries
-- If doc fits in one chunk → single LLM call
-- If doc exceeds limit → chunk → summarize each → combine summaries → final summarize
-- Log how many chunks were created
-
-### Rule 4: Resilience with Polly
-```csharp
-// Apply to ILlmClient calls:
-// - Retry: 3 attempts, exponential backoff (1s, 2s, 4s)
-// - Timeout: 30 seconds per attempt
-// - The Mock already throws TimeoutException 10% of the time — handle it
-```
-
-### Rule 5: Token & Cost Logging (evaluators will check logs)
-```
-// Log at Information level after every LLM call:
-// "Job {jobId} | Model: {model} | InputTokens: {input} | OutputTokens: {output} | CostUSD: {cost:F4}"
-// Cost formula: (InputTokens / 1000 * 0.01) + (OutputTokens / 1000 * 0.03)
-// Use mock-gpt-4 pricing above — mention real pricing in README
-```
-
-### Rule 6: Input Validation
-- Empty/null text → 400 Bad Request, message: "Text is required"
-- Text > 10,000 words → 400 Bad Request, message: "Document exceeds 10,000 word limit"
-- Non-string body / missing field → 400 Bad Request
-- JobId not found → 404 Not Found
-
-### Rule 7: Error Handling
-- All exceptions in BackgroundService MUST be caught — an unhandled exception kills the worker
-- Failed jobs store the exception message in `ErrorReason`
-- Worker continues processing after a job failure
+### Phase 2: Building (80 Minutes)
+* **API Layer:** Keep controllers/minimal APIs thin. Delegate logic to services [cite: 68].
+* **Mocking:** Use the provided `MockLlmClient` interface to simulate latency and failures. This prevents wasting time on network issues [cite: 85, 87].
+* **Resilience:** Implement Polly policies for retries and circuit breaking early [cite: 71].
 
 ---
 
-## EXACT API CONTRACT
+## Evaluation Criteria (Scoring Weights)
 
-### POST /summarize
-```json
-// Request
-{ "text": "document content here..." }
-
-// Response 202 Accepted
-{ "jobId": "uuid-here", "status": "Pending" }
-
-// Response 400
-{ "error": "Text is required" }
-```
-
-### GET /summarize/{jobId}
-```json
-// Pending/Processing
-{ "jobId": "abc", "status": "Pending" }
-
-// Completed
-{
-  "jobId": "abc",
-  "status": "Completed",
-  "summary": "...",
-  "tokens": 1284,
-  "costUsd": 0.0123
-}
-
-// Failed
-{
-  "jobId": "abc",
-  "status": "Failed",
-  "errorReason": "LLM timeout after 3 retries"
-}
-```
+| Area | Focus | Weight |
+| :--- | :--- | :--- |
+| **Async & Concurrency** | Bounded concurrency, priority handling, correct use of channels/semaphores. | 30% |
+| **Resilience** | Retries, backoff, cancellation handling. | 20% |
+| **Correctness** | Chunking, idempotency, token/cost aggregation. | 20% |
+| **Code Quality** | Structure, dependency injection, testability. | 15% |
+| **Validation & Errors** | Status codes, error handling. | 10% |
+| **Communication** | README, demo, trade-off reasoning. | 5% |
 
 ---
 
-## CODE TO WRITE — IN THIS ORDER
-
-1. `SarhSummarizer.csproj` — add Polly NuGet package
-2. `Models/SummarizationJob.cs` — job entity
-3. `Models/ApiModels.cs` — DTOs
-4. `Models/LlmResponse.cs` — record
-5. `Services/ILlmClient.cs` + `MockLlmClient.cs`
-6. `Services/IJobStore.cs` + `InMemoryJobStore.cs`
-7. `Services/TextChunker.cs`
-8. `Workers/SummarizationWorker.cs`
-9. `Program.cs` — wire everything together
-10. `README.md` — last, after all code works
-
----
-
-## PROGRAM.CS STRUCTURE (Minimal API)
-
-```csharp
-// Registration order:
-builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
-builder.Services.AddSingleton<Channel<string>>(/* bounded channel, capacity 100 */);
-builder.Services.AddSingleton<ILlmClient, MockLlmClient>();
-builder.Services.AddHostedService<SummarizationWorker>();
-
-// Polly retry pipeline on ILlmClient (add as decorator or use ResiliencePipeline directly)
-
-// Endpoints:
-app.MapPost("/summarize", ...)
-app.MapGet("/summarize/{jobId}", ...)
-```
-
----
-
-## WHAT TO SAY IN THE DEMO
-
-When running, show these curl commands working:
-1. POST with short text → immediate jobId response
-2. GET status → Pending, then Completed
-3. POST with 12,000 word text → show chunking in logs
-4. GET result → combined summary with tokens + cost
-5. Mention: "10% mock failure rate triggers Polly retry — you can see retries in the logs"
-
----
-
-## DO NOT DO THESE THINGS
-
-- Do NOT use Entity Framework or any database (in-memory is correct for scope)
-- Do NOT use Hangfire (overkill, adds complexity)
-- Do NOT use FluentValidation (not worth the setup time)
-- Do NOT use controller-based API (Minimal API is faster and cleaner here)
-- Do NOT call a real LLM API (waste of time)
-- Do NOT add authentication/authorization (out of scope)
-- Do NOT add Swagger UI setup beyond the default (auto-included in .NET 8)
-- Do NOT add unit tests (no time — mention in README "what I'd add next")
+## Key Tips for Success
+* **Honesty:** Be explicit in your `README` about what features are finished and what were skipped. Never claim functionality that isn't implemented [cite: 134, 135].
+* **Trade-offs:** If you run out of time, write a clear comment or README note explaining *how* you would have implemented the missing feature [cite: 169].
+* **Communication:** Prepare to discuss your design decisions and concurrency trade-offs during the demo [cite: 133].

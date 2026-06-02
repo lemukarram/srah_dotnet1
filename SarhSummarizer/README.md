@@ -1,81 +1,59 @@
-# SarhSummarizer
+# Sarh Summarizer API
 
-A production-quality .NET 8 ASP.NET Core Web API for document summarization. It processes long text documents asynchronously using a background job queue and provides a polling endpoint for status and results.
+This is an asynchronous backend service that orchestrates calls to an AI/LLM API for summarization. It is designed with bounded concurrency, queueing, and resilience in mind.
 
-## Features
+## Core Requirements Implemented
 
-- **Asynchronous Processing**: Immediate response with `jobId` while processing happens in the background.
-- **Robust Chunking**: Automatically splits documents larger than 3,000 words into chunks for processing.
-- **Resilience**: Implements Polly v8 resilience pipelines with exponential backoff retries and timeouts for LLM calls.
-- **Observability**: Structured logging of job status, chunking details, token usage, and simulated costs.
-- **Clean Architecture**: Separation of concerns between models, services, and background workers.
+- **Bounded Concurrency:** The `SummarizationWorker` processes background jobs with a configurable concurrency limit (default 3) using a `SemaphoreSlim`. This acts as a worker pipeline and enforces back-pressure.
+- **Priority Queue:** The `JobQueue` uses a two-tier internal queue system, always yielding `high` priority jobs before `normal` jobs.
+- **Chunking & Reassembly (Map-Reduce):** Documents are chunked into pieces in `LlmService`. Each chunk is sent to the mock LLM. If there are multiple chunks, their resulting summaries are concatenated and sent for a final summarization pass.
+- **Resilience:** Polly is used for transient fault handling in `LlmService`. A retry policy with exponential backoff triggers on `HttpRequestException` (which is randomly thrown by the `MockLlmClient`).
+- **Monitoring & Logging:** `ILogger` is used throughout to record tokens used, cost per job, and to trace the job lifecycle. If used with the included `seq` container, structured logs provide deep visibility.
+- **Validation:** Strict validation rules apply to incoming text: requests with over 50,000 words are rejected with a 400 Bad Request. Empty content is also rejected.
 
-## Tech Stack
+## Stretch Goals Implemented
 
-- **Framework**: .NET 8 (ASP.NET Core Minimal API)
-- **Job Queue**: `System.Threading.Channels` (In-memory)
-- **Background Worker**: `BackgroundService`
-- **Resilience**: `Polly`
-- **Logging**: `ILogger`
-- **Mock LLM**: `MockLlmClient` (simulates latency and 10% failure rate)
+- **Listing Endpoint:** The `GET /jobs?status=...&limit=10&offset=0` endpoint is fully implemented and operational, enabling an administrative dashboard to monitor queue length and statuses.
+- **Idempotency Key:** Implemented basic idempotency based on an `Idempotency-Key` header during job submission to prevent duplicate job creation.
 
-## Getting Started
+## Stretch Goals Skipped & Trade-offs (Time Constraints)
 
-### Prerequisites
+To prioritize robust functionality and correct concurrency logic over half-working features, the following stretch goals were omitted:
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- **Persistence (SQLite/File-based):** Currently, jobs are stored in an in-memory `ConcurrentDictionary`. 
+  - *How I would implement it:* I would use Entity Framework Core with a SQLite provider, mapping the `Job` model to a database table. The background worker would query the DB for "Pending" jobs or use a transactional outbox pattern rather than relying on an in-memory queue.
+- **Deduplication by Content Hash:** 
+  - *How I would implement it:* Before creating a job, compute a SHA-256 hash of the input text. Check a cache (e.g., Redis or an in-memory cache) for this hash. If a completed result exists, return it immediately to save LLM costs.
+- **Unit/Integration Testing:** 
+  - *How I would implement it:* I would create an xUnit project, using `WebApplicationFactory` for integration tests to verify the API endpoints. I would inject a test-specific `IMockLlmClient` to verify that `N` concurrent calls are strictly enforced and priority queueing works as expected under load.
 
-### Running the Application
+## Running the Application
 
-1. Navigate to the project directory:
-   ```bash
-   cd SarhSummarizer
-   ```
-2. Run the application:
-   ```bash
-   dotnet run
-   ```
-3. The API will be available at `http://localhost:5000` (or the port specified in your console output). Swagger UI is available at `http://localhost:5000/swagger`.
+Use Docker Compose to spin up the API and the Seq logging instance:
 
-## API Usage & Demo
-
-### 1. Submit a short document
 ```bash
-curl -X POST http://localhost:5000/summarize \
+docker compose up --build
+```
+
+- API Base URL: `http://localhost:5005`
+- Seq Logging UI: `http://localhost:5341`
+
+## Example Flow
+
+1. Submit a job:
+```bash
+curl -X POST http://localhost:5005/jobs \
   -H "Content-Type: application/json" \
-  -d '{"text": "The quick brown fox jumps over the lazy dog."}'
+  -H "Idempotency-Key: my-unique-key" \
+  -d '{"text": "A very long document goes here...", "priority": "high"}'
 ```
-*Response: 202 Accepted with jobId.*
 
-### 2. Check Job Status
-Replace `{jobId}` with the ID from the previous step:
+2. Check Status:
 ```bash
-curl http://localhost:5000/summarize/{jobId}
+curl http://localhost:5005/jobs/{jobId}
 ```
-*Response: Pending -> Processing -> Completed.*
 
-### 3. Submit a long document (> 3000 words)
-You can use a large text file or repeat text to test chunking logic. The application will log chunking details to the console.
-
-### 4. Validation Errors
-Submit empty text to see a 400 Bad Request:
+3. List Jobs:
 ```bash
-curl -X POST http://localhost:5000/summarize \
-  -H "Content-Type: application/json" \
-  -d '{"text": ""}'
+curl "http://localhost:5005/jobs?status=Processing&limit=5"
 ```
-
-## Architecture Notes
-
-- **In-Memory Storage**: For the scope of this assessment, jobs are stored in a `ConcurrentDictionary`. In a real-world scenario, this would be replaced by a persistent database (e.g., PostgreSQL or Redis).
-- **Background Worker**: The `SummarizationWorker` processes jobs sequentially from the channel. For high-scale, multiple worker instances or a distributed queue (like RabbitMQ) could be used.
-- **Polly Retries**: The `MockLlmClient` has a 10% failure rate (TimeoutException). You can observe Polly retrying the requests in the console logs.
-- **Cost Calculation**: Costs are calculated using mock GPT-4 pricing: $0.01/1k input tokens and $0.03/1k output tokens.
-
-## Future Improvements (Next Steps)
-
-- **Persistent Storage**: Integrate Entity Framework Core for database persistence.
-- **Distributed Queue**: Use MassTransit with RabbitMQ or Azure Service Bus for distributed background processing.
-- **Unit & Integration Tests**: Add xUnit tests for `TextChunker`, `MockLlmClient`, and API endpoints.
-- **Authentication**: Secure the API with JWT or API Keys.
-- **Real LLM Integration**: Replace `MockLlmClient` with a real OpenAI or Azure OpenAI implementation.

@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using Microsoft.AspNetCore.Mvc;
 using SarhSummarizer.Models;
 using SarhSummarizer.Services;
@@ -6,29 +5,20 @@ using SarhSummarizer.Workers;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- Dependency Injection Registration ---
-
-// Job storage (In-memory)
-builder.Services.AddSingleton<IJobStore, InMemoryJobStore>();
-
-// Text chunking utility
-builder.Services.AddSingleton<TextChunker>();
-
-// LLM Client (Mock)
-builder.Services.AddSingleton<ILlmClient, MockLlmClient>();
-
-// Bounded Channel for background processing (Capacity 100 as per brief)
-builder.Services.AddSingleton(Channel.CreateBounded<string>(new BoundedChannelOptions(100)
-{
-    FullMode = BoundedChannelFullMode.Wait
-}));
-
-// Background Worker
-builder.Services.AddHostedService<SummarizationWorker>();
-
-// Add Swagger/OpenAPI for testing
+// Add services to the container.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+// Register App Services
+builder.Services.AddSingleton<IJobQueue, JobQueue>();
+builder.Services.AddSingleton<IJobManager, JobManager>();
+
+// Register LLM Services
+builder.Services.AddSingleton<IMockLlmClient, MockLlmClient>();
+builder.Services.AddTransient<ILlmService, LlmService>();
+
+// Register Background Worker
+builder.Services.AddHostedService<SummarizationWorker>();
 
 var app = builder.Build();
 
@@ -41,63 +31,79 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// --- API Endpoints ---
+// Map Endpoints
 
-// POST /summarize
-app.MapPost("/summarize", async (
-    [FromBody] SummarizeRequest request,
-    [FromServices] IJobStore jobStore,
-    [FromServices] Channel<string> queue) =>
+app.MapPost("/jobs", ([FromBody] SubmitJobRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, IJobManager jobManager) =>
 {
-    // Rule 6: Input Validation
-    if (string.IsNullOrWhiteSpace(request?.Text))
+    if (string.IsNullOrWhiteSpace(request.Text))
     {
-        return Results.BadRequest(new ErrorResponse("Text is required"));
+        return Results.BadRequest(new { error = "Text cannot be empty." });
+    }
+    
+    int wordCount = request.Text.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
+    if (wordCount > 50000)
+    {
+        return Results.BadRequest(new { error = "Text exceeds maximum allowed word count of 50,000." });
     }
 
-    var wordCount = request.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
-    if (wordCount > 10000)
-    {
-        return Results.BadRequest(new ErrorResponse("Document exceeds 10,000 word limit"));
-    }
+    var job = jobManager.CreateJob(request, idempotencyKey);
+    return Results.Accepted($"/jobs/{job.Id}", new { jobId = job.Id, status = job.Status.ToString() });
+});
 
-    // Create job
-    var job = new SummarizationJob { Text = request.Text };
-    jobStore.AddJob(job);
-
-    // Enqueue for background processing
-    // Rule 1: Return immediately
-    await queue.Writer.WriteAsync(job.JobId);
-
-    return Results.Accepted($"/summarize/{job.JobId}", new SummarizeResponse(job.JobId, job.Status.ToString()));
-})
-.WithName("PostSummarize")
-.WithOpenApi();
-
-// GET /summarize/{jobId}
-app.MapGet("/summarize/{jobId}", (
-    string jobId,
-    [FromServices] IJobStore jobStore) =>
+app.MapGet("/jobs/{jobId}", (string jobId, IJobManager jobManager) =>
 {
-    var job = jobStore.GetJob(jobId);
-
-    // Rule 6: JobId not found
+    var job = jobManager.GetJob(jobId);
     if (job == null)
     {
-        return Results.NotFound(new ErrorResponse("Job not found"));
+        return Results.NotFound(new { error = "Job not found." });
     }
 
-    // Return status/results based on job state
-    return Results.Ok(new JobStatusResponse(
-        job.JobId,
-        job.Status.ToString(),
-        job.Summary,
-        job.Tokens,
-        job.CostUsd,
-        job.ErrorReason
-    ));
-})
-.WithName("GetSummarizeStatus")
-.WithOpenApi();
+    var response = new JobResponse
+    {
+        Id = job.Id,
+        Status = job.Status.ToString(),
+        Summary = job.Summary,
+        Tokens = job.Status == JobStatus.Completed ? job.Tokens : null,
+        CostUsd = job.Status == JobStatus.Completed ? job.CostUsd : null,
+        Progress = new JobProgress { ChunksDone = job.ChunksDone, ChunksTotal = job.ChunksTotal },
+        Error = job.Error
+    };
+
+    return Results.Ok(response);
+});
+
+app.MapDelete("/jobs/{jobId}", (string jobId, IJobManager jobManager) =>
+{
+    var job = jobManager.GetJob(jobId);
+    if (job == null)
+    {
+        return Results.NotFound(new { error = "Job not found." });
+    }
+
+    if (jobManager.CancelJob(jobId))
+    {
+        return Results.Ok(new { status = JobStatus.Cancelled.ToString() });
+    }
+
+    return Results.Ok(new { status = job.Status.ToString() });
+});
+
+app.MapGet("/jobs", ([FromQuery] string? status, IJobManager jobManager, [FromQuery] int limit = 10, [FromQuery] int offset = 0) =>
+{
+    var jobs = jobManager.GetJobs(status, limit, offset);
+    
+    var response = jobs.Select(job => new JobResponse
+    {
+        Id = job.Id,
+        Status = job.Status.ToString(),
+        Summary = job.Summary,
+        Tokens = job.Status == JobStatus.Completed ? job.Tokens : null,
+        CostUsd = job.Status == JobStatus.Completed ? job.CostUsd : null,
+        Progress = new JobProgress { ChunksDone = job.ChunksDone, ChunksTotal = job.ChunksTotal },
+        Error = job.Error
+    });
+
+    return Results.Ok(response);
+});
 
 app.Run();
