@@ -1,24 +1,35 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
 namespace SarhSummarizer.Services;
 
-public class MockLlmClient : IMockLlmClient
+public class MockLlmClient : ILlmClient
 {
     private readonly Random _random = new();
 
-    public async Task<LlmResult> SummarizeTextAsync(string text, CancellationToken cancellationToken = default)
+    public async Task<LlmResponse> SummarizeAsync(string prompt, CancellationToken ct)
     {
-        await Task.Delay(_random.Next(500, 2000), cancellationToken);
+        // Simulate network + model latency (honor cancellation!)
+        var delay = TimeSpan.FromMilliseconds(_random.Next(1500, 3500));
+        await Task.Delay(delay, ct);
 
-        if (_random.NextDouble() < 0.2)
-        {
-            throw new HttpRequestException("Simulated transient network error (5xx/429)");
-        }
+        // ~15% transient failures: timeouts and rate limits
+        var roll = _random.NextDouble();
+        if (roll < 0.08) throw new TimeoutException("Mock LLM timeout");
+        if (roll < 0.15) throw new RateLimitException("Mock 429: slow down");
 
-        int tokens = text.Length / 4;
-
-        return new LlmResult
-        {
-            Summary = $"Summary of chunk (length {text.Length}): {text.Substring(0, Math.Min(50, text.Length))}...",
-            TokensUsed = tokens
-        };
+        var inputTokens = prompt.Length / 4;
+        return new LlmResponse(
+            Summary: $"Mock summary of {prompt.Length} chars.",
+            InputTokens: inputTokens,
+            OutputTokens: 50,
+            Model: "mock-gpt-4"
+        );
     }
+}
+
+public class RateLimitException : Exception
+{
+    public RateLimitException(string message) : base(message) { }
 }

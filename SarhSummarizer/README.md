@@ -25,7 +25,7 @@ To prioritize robust functionality and correct concurrency logic over half-worki
 - **Deduplication by Content Hash:** 
   - *How I would implement it:* Before creating a job, compute a SHA-256 hash of the input text. Check a cache (e.g., Redis or an in-memory cache) for this hash. If a completed result exists, return it immediately to save LLM costs.
 - **Unit/Integration Testing:** 
-  - *How I would implement it:* I would create an xUnit project, using `WebApplicationFactory` for integration tests to verify the API endpoints. I would inject a test-specific `IMockLlmClient` to verify that `N` concurrent calls are strictly enforced and priority queueing works as expected under load.
+  - *How I would implement it:* I would create an xUnit project, using `WebApplicationFactory` for integration tests to verify the API endpoints. I would inject a test-specific `ILlmClient` to verify that `N` concurrent calls are strictly enforced and priority queueing works as expected under load.
 
 ## Running the Application
 
@@ -56,4 +56,5 @@ curl http://localhost:5005/jobs/{jobId}
 3. List Jobs:
 ```bash
 curl "http://localhost:5005/jobs?status=Processing&limit=5"
+```us=Processing&limit=5"
 ```

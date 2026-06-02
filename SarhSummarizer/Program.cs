@@ -14,7 +14,7 @@ builder.Services.AddSingleton<IJobQueue, JobQueue>();
 builder.Services.AddSingleton<IJobManager, JobManager>();
 
 // Register LLM Services
-builder.Services.AddSingleton<IMockLlmClient, MockLlmClient>();
+builder.Services.AddSingleton<ILlmClient, MockLlmClient>();
 builder.Services.AddTransient<ILlmService, LlmService>();
 
 // Register Background Worker
@@ -33,8 +33,31 @@ app.UseHttpsRedirection();
 
 // Map Endpoints
 
-app.MapPost("/jobs", ([FromBody] SubmitJobRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, IJobManager jobManager) =>
+app.MapPost("/jobs", async (HttpContext httpContext, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey, IJobManager jobManager) =>
 {
+    if (httpContext.Request.ContentType == null || !httpContext.Request.ContentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Json(new { error = "Content type must be application/json." }, statusCode: 415);
+    }
+    
+    SubmitJobRequest? request;
+    try
+    {
+        request = await httpContext.Request.ReadFromJsonAsync<SubmitJobRequest>();
+        if (request == null)
+        {
+            return Results.BadRequest(new { error = "Invalid JSON body." });
+        }
+    }
+    catch (System.Text.Json.JsonException ex)
+    {
+        return Results.BadRequest(new { error = "Invalid JSON format: " + ex.Message });
+    }
+    catch (Microsoft.AspNetCore.Http.BadHttpRequestException ex)
+    {
+        return Results.BadRequest(new { error = "Invalid request: " + ex.Message });
+    }
+    
     if (string.IsNullOrWhiteSpace(request.Text))
     {
         return Results.BadRequest(new { error = "Text cannot be empty." });
@@ -44,6 +67,13 @@ app.MapPost("/jobs", ([FromBody] SubmitJobRequest request, [FromHeader(Name = "I
     if (wordCount > 50000)
     {
         return Results.BadRequest(new { error = "Text exceeds maximum allowed word count of 50,000." });
+    }
+
+    if (!string.IsNullOrEmpty(request.Priority) && 
+        !request.Priority.Equals("high", StringComparison.OrdinalIgnoreCase) && 
+        !request.Priority.Equals("normal", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.BadRequest(new { error = "Priority must be 'high' or 'normal'." });
     }
 
     var job = jobManager.CreateJob(request, idempotencyKey);
