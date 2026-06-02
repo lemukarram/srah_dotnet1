@@ -25,7 +25,7 @@ The service supports `high` and `normal` priority jobs. High-priority jobs jump 
 
 ### 5. Input Validation & Robustness
 - **Strict Validation:** Rejects empty inputs, documents exceeding 50,000 words, and invalid priority levels.
-- **JSON Newline Support:** Custom handling for unescaped control characters (like newlines) in the JSON body, often encountered in raw document ingestion.
+- **Large Text Input Issue (Fixed):** Resolved a parsing failure caused by unescaped newlines in JSON bodies. Instead of destructive string replacement or strict parser failure, a character-by-character scanner safely escapes control characters (`\n`, `\r`, `\t`) only when they are inside JSON string values, preserving the payload's integrity and special characters.
 - **Multi-Format Support:** Accepts both `application/json` and `text/plain` content types.
 
 ---

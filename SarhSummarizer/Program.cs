@@ -53,13 +53,37 @@ app.MapPost("/jobs", async (
     {
         try
         {
-            // .NET 8's System.Text.Json is strict about unescaped control characters in strings.
-            // To handle literal newlines, we read the body and manually escape them before deserialization.
             using var reader = new StreamReader(httpContext.Request.Body);
             var rawBody = await reader.ReadToEndAsync();
-            
-            // This is a simple heuristic: replace literal newlines with escaped versions.
-            var sanitizedJson = rawBody.Replace("\n", "\\n").Replace("\r", "\\r");
+
+            var sb = new System.Text.StringBuilder(rawBody.Length);
+            bool inQuotes = false;
+            bool isEscaped = false;
+
+            foreach (char c in rawBody)
+            {
+                if (c == '"' && !isEscaped)
+                {
+                    inQuotes = !inQuotes;
+                    sb.Append(c);
+                }
+                else if (inQuotes)
+                {
+                    if (c == '\n') sb.Append("\\n");
+                    else if (c == '\r') sb.Append("\\r");
+                    else if (c == '\t') sb.Append("\\t");
+                    else sb.Append(c);
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+
+                if (c == '\\' && !isEscaped) isEscaped = true;
+                else isEscaped = false;
+            }
+
+            var sanitizedJson = sb.ToString();
             
             var serializerOptions = new JsonSerializerOptions 
             { 
@@ -113,7 +137,8 @@ app.MapPost("/jobs", async (
 
     var job = jobManager.CreateJob(request, idempotencyKey);
     return Results.Accepted($"/jobs/{job.Id}", new { jobId = job.Id, status = job.Status.ToString() });
-});
+})
+.Accepts<SubmitJobRequest>("application/json", "text/plain");
 
 app.MapGet("/jobs/{jobId}", (string jobId, IJobManager jobManager) =>
 {
