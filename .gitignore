@@ -1,5 +1,6 @@
 # .gitignore for .NET and custom requirements
 *.md
+!README.md
 
 # .NET / Visual Studio
 bin/
